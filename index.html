@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Valorant Rank Overlay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+  /* Einstellungen stehen in config.json (siehe README).
+     Werte lassen sich zusätzlich per URL überschreiben, z.B.
+     https://deinname.github.io/valorant-rank-overlay/?name=Spieler&tag=EUW&debug=1 */
+  :root {
+    --rank: #e8c15a;          /* wird automatisch pro Rang gesetzt */
+    --panel: rgba(15, 20, 28, 0.82);
+    --text: #f2f4f6;
+    --muted: #8b95a3;
+    --up: #3ee08f;
+    --down: #ff4d5e;
+  }
+  html, body {
+    margin: 0;
+    background: transparent;
+    overflow: hidden;
+    font-family: "Saira Condensed", "Arial Narrow", Arial, sans-serif;
+    color: var(--text);
+  }
+  .card {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    width: 440px;
+    padding: 14px 22px 14px 14px;
+    background: var(--panel);
+    clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%);
+    border-left: 4px solid var(--rank);
+    box-sizing: border-box;
+    transition: border-color .6s;
+  }
+  .badge-wrap {
+    position: relative;
+    width: 96px;
+    height: 96px;
+    flex: none;
+    display: grid;
+    place-items: center;
+  }
+  .badge-wrap::before {
+    content: "";
+    position: absolute;
+    inset: 8px;
+    border-radius: 50%;
+    background: var(--rank);
+    filter: blur(22px);
+    opacity: .35;
+    transition: background .6s;
+  }
+  .badge {
+    position: relative;
+    width: 96px;
+    height: 96px;
+    object-fit: contain;
+  }
+  .info { flex: 1; min-width: 0; }
+  .rank-name {
+    font-size: 40px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: .01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .bar {
+    flex: 1;
+    height: 6px;
+    background: rgba(255,255,255,.12);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--rank);
+    transition: width 1s cubic-bezier(.2,.8,.2,1), background .6s;
+  }
+  .rr {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .rr b { color: var(--text); font-weight: 700; }
+  .change {
+    font-size: 22px;
+    font-weight: 800;
+    padding: 0 8px;
+    line-height: 30px;
+    white-space: nowrap;
+  }
+  .change.up   { color: var(--up);   background: rgba(62,224,143,.14); }
+  .change.down { color: var(--down); background: rgba(255,77,94,.14); }
+  .change.flat { color: var(--muted); background: rgba(255,255,255,.08); }
+  .change.hidden { display: none; }
+  .pulse { animation: pulse 1.2s ease-out 1; }
+  @keyframes pulse {
+    0%   { transform: scale(1.35); }
+    100% { transform: scale(1); }
+  }
+  .error {
+    font-size: 18px;
+    color: var(--muted);
+  }
+  .debug {
+    margin-top: 8px;
+    font: 12px/1.3 Consolas, monospace;
+    color: #9aa4b1;
+    max-width: 440px;
+    word-break: break-all;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse { animation: none; }
+    .bar-fill { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="card" id="card">
+  <div class="badge-wrap"><img class="badge" id="badge" alt="" style="visibility:hidden" onload="this.style.visibility='visible'" onerror="this.style.visibility='hidden'"></div>
+  <div class="info">
+    <div class="rank-name" id="rankName">Lädt …</div>
+    <div class="row" id="row">
+      <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+      <div class="rr" id="rr"></div>
+      <div class="change hidden" id="change"></div>
+    </div>
+  </div>
+</div>
+<div class="debug" id="debug" hidden></div>
+
+<script>
+  /* Standardwerte – werden von config.json und URL-Parametern überschrieben */
+  const CONFIG = {
+    worker: "",          // URL deines Cloudflare Workers, z.B. https://valorant-rank.deinname.workers.dev
+    region: "eu",
+    name: "",
+    tag: "",
+    interval: 60,        // Aktualisierung in Sekunden (mindestens 15)
+    debug: false         // zeigt die Roh-Antwort unter dem Overlay
+  };
+  let API = "";
+
+  async function loadConfig() {
+    try {
+      const res = await fetch("config.json", { cache: "no-store" });
+      if (res.ok) Object.assign(CONFIG, await res.json());
+    } catch (e) { /* keine config.json – dann nur Standardwerte und URL-Parameter */ }
+
+    const qs = new URLSearchParams(location.search);
+    for (const k of Object.keys(CONFIG)) {
+      if (!qs.has(k)) continue;
+      const v = qs.get(k);
+      CONFIG[k] = k === "debug" ? (v === "1" || v === "true") : k === "interval" ? Number(v) : v;
+    }
+    const base = String(CONFIG.worker || "").trim().replace(/\/+$/, "");
+    API = base ? `${base}/${encodeURIComponent(CONFIG.region)}/${encodeURIComponent(CONFIG.name)}/${encodeURIComponent(CONFIG.tag)}` : "";
+  }
+
+  const ICON = t => `https://media.valorant-api.com/competitivetiers/03621f52-342b-cf4e-4f86-9350a49c6d04/${t}/largeicon.png`;
+
+  // Basis-Tier (Stufe 1) + Farbe; deutsche und englische Namen
+  const RANKS = [
+    { keys: ["iron", "eisen"],               base: 3,  color: "#9aa0a6", en: "Iron" },
+    { keys: ["bronze"],                      base: 6,  color: "#c08f5a", en: "Bronze" },
+    { keys: ["silver", "silber"],            base: 9,  color: "#d8dde2", en: "Silver" },
+    { keys: ["gold"],                        base: 12, color: "#e8c15a", en: "Gold" },
+    { keys: ["platinum", "platin"],          base: 15, color: "#3fbfcc", en: "Platinum" },
+    { keys: ["diamond", "diamant"],          base: 18, color: "#c68af5", en: "Diamond" },
+    { keys: ["ascendant", "aszendent"],      base: 21, color: "#3ec28a", en: "Ascendant" },
+    { keys: ["immortal", "unsterblich"],     base: 24, color: "#e0485c", en: "Immortal" },
+    { keys: ["radiant", "strahlend"],        base: 27, color: "#ffe28a", en: "Radiant", single: true }
+  ];
+
+  const $ = id => document.getElementById(id);
+  let lastKey = null;
+
+  function parse(text) {
+    const t = text.replace(/\s+/g, " ").trim();
+    const lower = t.toLowerCase();
+
+    let rank = null, division = null;
+    for (const r of RANKS) {
+      for (const key of r.keys) {
+        const m = lower.match(new RegExp(key + "\\s*([123])?"));
+        if (m) { rank = r; division = r.single ? null : Number(m[1] || 1); break; }
+      }
+      if (rank) break;
+    }
+
+    const rrMatch = t.match(/(\d+)\s*RR/i);
+    const rr = rrMatch ? Number(rrMatch[1]) : null;
+
+    // MMR-Change: Format "[18]" bzw. "[-18]", sonst Zahl mit Vorzeichen oder in Klammern
+    let change = null;
+    const bracket = t.match(/[\[(]\s*([+\-−]?)\s*(\d+)\s*[\])]/);
+    if (bracket) {
+      change = (bracket[1] && bracket[1] !== "+" ? -1 : 1) * Number(bracket[2]);
+    } else {
+      const signed = [...t.matchAll(/([+\-−])\s?(\d+)/g)];
+      if (signed.length) {
+        const s = signed[signed.length - 1];
+        change = (s[1] === "+" ? 1 : -1) * Number(s[2]);
+      }
+    }
+
+    return { raw: t, rank, division, rr, change };
+  }
+
+  function render(d) {
+    const card = $("card");
+    if (!d.rank) {
+      card.style.setProperty("--rank", "#6b7480");
+      $("badge").src = ICON(0);
+      $("rankName").textContent = /unrank|unrated/i.test(d.raw) ? "Unranked" : d.raw || "Kein Rang";
+      $("rr").innerHTML = "";
+      $("barFill").style.width = "0%";
+      $("change").className = "change hidden";
+      return;
+    }
+
+    const tier = d.rank.single ? d.rank.base : d.rank.base + (d.division - 1);
+    card.style.setProperty("--rank", d.rank.color);
+    $("badge").src = ICON(tier);
+    $("rankName").textContent = d.rank.single ? d.rank.en : `${d.rank.en} ${d.division}`;
+
+    if (d.rr !== null) {
+      $("rr").innerHTML = `<b>${d.rr}</b> RR`;
+      $("barFill").style.width = Math.min(d.rr, 100) + "%";
+      $("row").querySelector(".bar").style.display = "";
+    } else {
+      $("rr").innerHTML = "";
+      $("row").querySelector(".bar").style.display = "none";
+    }
+
+    const ch = $("change");
+    if (d.change === null) {
+      ch.className = "change hidden";
+    } else {
+      const cls = d.change > 0 ? "up" : d.change < 0 ? "down" : "flat";
+      ch.textContent = d.change > 0 ? `+${d.change}` : d.change < 0 ? `−${Math.abs(d.change)}` : "±0";
+      const key = `${tier}|${d.rr}|${d.change}`;
+      ch.className = `change ${cls}`;
+      if (lastKey !== null && key !== lastKey) {
+        void ch.offsetWidth;
+        ch.classList.add("pulse");
+      }
+      lastKey = key;
+    }
+  }
+
+  async function getRankText() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const res = await fetch(API + "?_=" + Date.now(), { cache: "no-store", signal: ctrl.signal });
+      const text = (await res.text()).trim();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 120)}`);
+      if (!text) throw new Error("leere Antwort");
+      return { text, via: "Worker" };
+    } finally { clearTimeout(timer); }
+  }
+
+  async function update() {
+    try {
+      const { text, via } = await getRankText();
+      const data = parse(text);
+      render(data);
+      if (CONFIG.debug) { $("debug").hidden = false; $("debug").textContent = `API (${via}): ${text}`; }
+    } catch (e) {
+      if (lastKey === null) {
+        $("rankName").innerHTML = '<span class="error">Rank-API nicht erreichbar</span>';
+      }
+      if (CONFIG.debug) { $("debug").hidden = false; $("debug").textContent = "Fehler: " + e.message; }
+    }
+  }
+
+  (async () => {
+    await loadConfig();
+    if (!CONFIG.name || !CONFIG.tag) {
+      $("rankName").innerHTML = '<span class="error">Name/Tag fehlt in config.json</span>';
+      return;
+    }
+    if (!API) {
+      $("rankName").innerHTML = '<span class="error">Worker-URL fehlt in config.json</span>';
+      return;
+    }
+    update();
+    setInterval(update, Math.max(15, Number(CONFIG.interval) || 60) * 1000);
+  })();
+</script>
+</body>
+</html>

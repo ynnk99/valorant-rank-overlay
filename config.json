@@ -1,0 +1,8 @@
+{
+  "worker": "https://valorant-rank.yalobroo.workers.dev/",
+  "region": "eu",
+  "name": "1vorcrashout",
+  "tag": "1717",
+  "interval": 20,
+  "debug": false
+}
